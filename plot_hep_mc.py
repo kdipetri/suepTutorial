@@ -1,10 +1,12 @@
 #!/usr/bin/env python
-# based on from Katherine Pachal & Jess Nelson 
+# based Katherine Pachal & Jess Nelson's skeleton 
 # https://gitlab.cern.ch/snowmass-track-trigger/scripts_lhe_hepmc
+# event displays from Chris Papageorgakis
 
 from particle import Particle
 import pyhepmc_ng as hep
 import matplotlib.pyplot as plt
+import matplotlib.patches as mpatches
 import numpy as np
 import math
 
@@ -18,27 +20,39 @@ def getStatusOne(particles):
 
     return statusOne
 
+def hasScalarParent(particle):
+    # returns True if a particle descends from scalar 
+    scalar_parent=False
+
+    parents=particle.parents
+    if not parents : return scalar_parent
+    else:
+        for parent in particle.parents:
+            if parent.pid == 999999 :return True# dark meson
+            else : return hasScalarParent(parent)
+
+    return statusOne
+
 def isCharged(particle):
     part = Particle.from_pdgid(particle.pid)
     if part.charge !=0 : return 1
     else : return 0
 
-def getIsotropy(particles,nSteps=500):
+def getIsotropy(particles,nSteps=100):
     # compute event isotropy, based on.... 
     # https://github.com/cms-sw/cmssw/blob/master/PhysicsTools/CandUtils/src/EventShapeVariables.cc
-    # welcome to slow city :(
-    if len(particles)==0 : return -1.
 
-    def getSum(phi):
-        tot = 0
+    def getSum(phi,particle):
         cosphi, sinphi = math.cos(phi), math.sin(phi)
-        for particle in particles: 
-            particle_mom = particle.momentum
-            tot+= math.fabs( cosphi * particle_mom.x + sinphi * particle_mom.y )
-        return tot
-    
+        return math.fabs( cosphi * particle + sinphi * particle )
+
     phis = np.linspace(0,2*math.pi,nSteps)
-    sums = [ getSum(phi) for phi in phis]
+    cosphis = np.cos(phis)
+    sinphis = np.sin(phis)
+    sums = np.zeros(nSteps)
+    for particle in particles:
+        sums += np.abs( cosphis * particle.momentum.x + sinphis * particle.momentum.y)
+
     eOut = min(sums)
     eIn = max(sums)
 
@@ -171,18 +185,19 @@ class SUEP():
                 print("Event",evt.event_number)
 
                 # Mediator info
-                print("scalar: PtEtaPhiM[{:.1f},{:.2f},{:.2f},{:.1f}]".format(self.scalarPt[-1],self.scalarEta[-1],self.scalarPhi[-1],self.scalarM[-1]) )
+                print("scalar: PtEtaPhiM[{:.2f}, {:.2f}, {:.2f}, {:.2f}]".format(self.scalarPt[-1],self.scalarEta[-1],self.scalarPhi[-1],self.scalarM[-1]) )
 
                 # Status=1 particles
                 print("Some final state charged particles: ")
                 particles = getStatusOne(evt.particles)
                 i=0
                 for part in particles : 
+                  if not hasScalarParent(part): continue
                   if part.momentum.pt() < 0.7: continue 
                   if not isCharged(part): continue
                   i+=1
                   trk=part.momentum
-                  print("pdgID {} : PtEtaPhiM[{:.1f},{:.2f},{:.2f},{:.1f}]".format(part.pid,trk.pt(),trk.eta(),trk.phi(),trk.m()))
+                  print("pdgID {} : PtEtaPhiM[{:.2f}, {:.2f}, {:.2f}, {:.2f}]".format(part.pid,trk.pt(),trk.eta(),trk.phi(),trk.m()))
                   if i>15: break
                 # Event level info
                 print("Number of status=1 particles:",len(particles)) 
@@ -213,7 +228,7 @@ class SUEP():
         axs[0,0].set_ylabel("events")
         
         # charged particle pT 
-        axs[0,1].hist(self.chargedPt, bins=nbins*10)
+        axs[0,1].hist(self.chargedPt, bins=np.linspace(0,5,50))
         axs[0,1].set_xlim(0,5)
         axs[0,1].set_xlabel("$p_{T}^{charged}$")
         axs[0,1].set_ylabel("charged particles")
@@ -234,35 +249,90 @@ class SUEP():
         return
 
     def eventDisplay(self,event=0,nbins=25,save=False): 
-        # makes an event display of track eta,phi,pt
-        
-        # printout
-        print("Event: {}".format(event,self.ht[event]))
-        print("HT = {:.1f}".format(self.ht[event]))
-        print("isotropy = {:.2f}".format(self.isotropy[event]))
+        # 
+        # Makes SUEP event display 
 
-        def scale():
-            s = [2500.*pt/self.ht[event] for pt in self.trackPt[event] ]
-            #s = [(10*pt/self.ht[event])**2 for pt in self.trackPt[event] ]
-            return s
-        
+        # quantites for plotting
+        part_pt = np.array([],dtype=float)
+        part_eta= np.array([],dtype=float)
+        part_phi= np.array([],dtype=float)
+        ht=0
+        # masks for plotting
+        fromScalar = np.array([],dtype=bool)
+        fromIsr    = np.array([],dtype=bool)
+        is_mu      = np.array([],dtype=bool)
+        is_e       = np.array([],dtype=bool)
+        is_gam     = np.array([],dtype=bool)
+        is_had     = np.array([],dtype=bool)
+
+        # Read the file
+        with hep.open(self.infile) as f:
+          while True :
+            evt = f.read()
+            if not evt : break # we're at the end of the file
+            if evt.event_number!=event: continue
+            
+            particles = getStatusOne(evt.particles)
+            for particle in particles:
+
+                # get track info
+                mom = particle.momentum
+                #if mom.pt() < 0.1 : continue
+                if mom.pt() < self.trackPtCut : continue
+                #if abs(mom.eta()) > self.maxEtaCut : continue
+                part_pt = np.append(part_pt , mom.pt())
+                part_phi= np.append(part_phi, mom.phi())
+                part_eta= np.append(part_eta, mom.eta())
+                ht+=mom.pt()
+
+                # handle masks
+                parent = hasScalarParent(particle)
+                fromScalar=np.append(fromScalar,parent)
+                fromIsr   =np.append(fromIsr,not parent)
+                is_e  =np.append(is_e  , abs(particle.pid) == 11)
+                is_mu =np.append(is_mu , abs(particle.pid) == 13)
+                is_gam=np.append(is_gam, abs(particle.pid) == 22)
+                is_had=np.append(is_had, abs(particle.pid) > 100)
+
+            break # done
+
         # 2D scatter plot 
         fig, ax = plt.subplots(figsize =(8, 6))
-        im = ax.scatter(self.trackEta[event], self.trackPhi[event], s=scale(),marker='o')#
-    
-        # 2D hist
-        #nx = np.linspace(-2.5,2.5,nbins) 
-        #ny = np.linspace(-3.5,3.5,nbins)
-        #
-        #im = ax.hist2d(self.trackEta[event], self.trackPhi[event], bins=(nx,ny), s=self.trackPt[event])#cmap=plt.get_cmap("Blues")) 
-        #
-        #cbar = plt.colorbar(im[3], ax=ax)
-        #cbar.set_label('$p_{T}^{track}$') #rotation=270)
+        def scale(vec_pt):
+            s = [50.*pt for pt in vec_pt ]
+            #s = [2500.*pt/ht for pt in vec_pt ]
+            return s
+        def draw(mask,mark='o',col='xkcd:blue'):
+            ax.scatter(part_eta[mask], part_phi[mask], s=scale(part_pt[mask]),marker=mark,c=col)
+            return
         
-        ax.set_xlabel("$\eta_{track}$")
-        ax.set_ylabel("$\phi_{track}$")
-        ax.set_xlim(-2.5,2.5)
+        draw(fromScalar & is_e  ,mark='o',col='xkcd:blue')#
+        draw(fromScalar & is_mu ,mark='v',col='xkcd:blue')#
+        draw(fromScalar & is_gam,mark='s',col='xkcd:blue')#
+        draw(fromScalar & is_had,mark='*',col='xkcd:blue')#
+        draw(fromIsr & is_e  ,mark='o',col='xkcd:magenta')#
+        draw(fromIsr & is_mu ,mark='v',col='xkcd:magenta')#
+        draw(fromIsr & is_gam,mark='s',col='xkcd:magenta')#
+        draw(fromIsr & is_had,mark='*',col='xkcd:magenta')#
+    
+        ax.set_xlabel("$\eta_{particle}$")
+        ax.set_ylabel("$\phi_{particle}$")
+        ax.set_xlim(-4.0,4.0)
         ax.set_ylim(-3.5,3.5)
+
+        # Legend 1 is particle type
+        line1 = ax.scatter([-100], [-100], label='$e$',marker='o', c='xkcd:black')
+        line2 = ax.scatter([-100], [-100], label='$\mu$', marker='v', c='xkcd:black')
+        line3 = ax.scatter([-100], [-100], label='$\gamma$', marker='s', c='xkcd:black')
+        line4 = ax.scatter([-100], [-100], label='hadron', marker='*', c='xkcd:black')
+        first_legend = plt.legend(handles=[line1, line2, line3, line4],
+                                  loc='upper right', fontsize=12)
+        ax.add_artist(first_legend)
+    
+        # Legend 2 is particle origin
+        blue_patch = mpatches.Patch(color='xkcd:blue', label='from scalar')
+        red_patch  = mpatches.Patch(color='xkcd:magenta', label='not from scalar')
+        plt.legend(handles=[blue_patch, red_patch],loc='upper left')
         
         if (save) : plt.savefig("eventdisplay_{}_{}.png".format(event,self.infile.strip(".hepmc")))
         else : plt.show()
